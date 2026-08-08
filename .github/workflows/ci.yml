@@ -44,15 +44,15 @@ jobs:
           --health-start-period 15s
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Instalar dependencias
-        run: pip install --no-cache-dir -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Validar o YAML do stack de deploy
         # Sem isto, erro de sintaxe no stack so aparece na hora do deploy, com a
