@@ -1,0 +1,84 @@
+# Suite de testes. Roda em push/PR e e chamada pelo publish.yml antes de
+# publicar imagem — nao existe caminho que publique sem passar por aqui.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      smoke:
+        description: "Rodar tambem o smoke com ingestao real (gasta OpenAI)"
+        type: boolean
+        default: false
+  # Permite que o publish.yml reaproveite este job em vez de duplicar a suite.
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      falkordb:
+        image: falkordb/falkordb:v4.14.2
+        env:
+          # A imagem tem ENTRYPOINT proprio (run.sh) que monta a linha do
+          # redis-server a partir destas variaveis. Um `command:` seria
+          # descartado em silencio — o mesmo detalhe que ja custou um banco
+          # subindo sem senha em desenvolvimento.
+          REDIS_ARGS: --requirepass senha-efemera-de-ci
+          BROWSER: "0"
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli -a senha-efemera-de-ci --no-auth-warning ping | grep -q PONG"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+          --health-start-period 15s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Validar o YAML do stack de deploy
+        # Sem isto, erro de sintaxe no stack so aparece na hora do deploy, com a
+        # imagem ja publicada e a janela de manutencao aberta.
+        run: docker compose -f deploy/stack-elephant-memory.yml config --quiet
+
+      - name: Suite de isolamento e permissao
+        # AUTH_TOKENS, PROJECTS e OPENAI_API_KEY ficam FORA do ambiente de
+        # proposito: a suite declara os seus por setdefault, e um valor ambiente
+        # incoerente com o registro derruba tudo ja na importacao.
+        env:
+          FALKORDB_HOST: 127.0.0.1
+          FALKORDB_PORT: "6379"
+          FALKORDB_PASSWORD: senha-efemera-de-ci
+        run: python tests/test_isolation.py
+
+      - name: Smoke com ingestao real (opcional, sob demanda)
+        if: ${{ inputs.smoke }}
+        env:
+          FALKORDB_HOST: 127.0.0.1
+          FALKORDB_PORT: "6379"
+          FALKORDB_PASSWORD: senha-efemera-de-ci
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "${OPENAI_API_KEY}" ]; then
+            echo "::warning::OPENAI_API_KEY nao configurado no repositorio. Smoke NAO rodou."
+            exit 0
+          fi
+          python tests/smoke.py
