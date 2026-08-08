@@ -15,7 +15,7 @@
 #   GHCR_OWNER              dono do registry (ex: ip2cloud)
 #   ELEPHANT_TAG        tag da imagem (ex: 0.1.0). NAO use `latest`:
 #                           o rebuild do grafo depende de versao fixa
-#   CF_ACCESS_TEAM_DOMAIN   ip2sec.cloudflareaccess.com
+#   CF_ACCESS_TEAM_DOMAIN   seutime.cloudflareaccess.com
 #   ELEPHANT_CF_AUD     Application Audience da Access App desta memoria
 #   PROJECTS                registro de projetos, JSON. Ex: ["scout-manager"]
 #   CF_ACCESS_GRANTS        identidade -> grants. Ex:
@@ -30,7 +30,7 @@
 #   Registry: credenciais do GHCR no Portainer + --with-registry-auth
 #
 # ── Cloudflare Tunnel: 1 Public Hostname ─────────────────────────────────────
-#   memoria.ip2sec.com.br -> http://elephant-mcp:8080
+#   memoria.SEU.DOMINIO -> http://elephant-mcp:8080
 #   Access Application com policy **Service Auth** e service tokens.
 #   Sem Access na frente, o servidor ainda recusa: ele valida o JWT por conta
 #   propria (AUTH_MODE=cloudflare). Defesa em profundidade, nao redundancia.

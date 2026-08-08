@@ -50,7 +50,7 @@ errada sem nenhuma mensagem que explique.
 
 ## 3. Cloudflare Zero Trust
 
-1. **Tunnel** → Public Hostname: `memoria.ip2sec.com.br` → `http://elephant-mcp:8080`
+1. **Tunnel** → Public Hostname: `memoria.SEU.DOMINIO` → `http://elephant-mcp:8080`
 2. **Access** → Application no mesmo hostname, policy **Service Auth**
 3. Anote o **Application Audience (AUD)** → vai em `ELEPHANT_CF_AUD`
 4. Crie os service tokens, um por papel:
@@ -72,7 +72,7 @@ vale lembrete no calendário.
 ```
 GHCR_OWNER             ip2cloud
 ELEPHANT_TAG           0.1.0
-CF_ACCESS_TEAM_DOMAIN  ip2sec.cloudflareaccess.com
+CF_ACCESS_TEAM_DOMAIN  seutime.cloudflareaccess.com
 ELEPHANT_CF_AUD        <AUD da Access App>
 PROJECTS               ["scout-manager"]
 CF_ACCESS_GRANTS       {"repo-scout":["read:scout-manager"],"alfredo-pessoal":["read:scout-manager","write:scout-manager"],"publicador-scout":["read:scout-manager","ingest:scout-manager"]}
@@ -103,19 +103,19 @@ docker stack deploy -c deploy/stack-elephant-memory.yml elephant-memory --with-r
 
 ```bash
 # 1. healthz responde (é público por desenho — não expõe nada)
-curl -s https://memoria.ip2sec.com.br/healthz
+curl -s https://memoria.SEU.DOMINIO/healthz
 
 # 2. SEM credencial deve dar 401 DO CLOUDFLARE, antes de chegar no container.
 #    Se vier 401 do app, a policy do Access está frouxa e o Tunnel está
 #    entregando tráfego não autenticado no origin.
-curl -si https://memoria.ip2sec.com.br/mcp | head -1
+curl -si https://memoria.SEU.DOMINIO/mcp | head -1
 
 # 3. COM service token e sem projeto -> 400 do app
-curl -si https://memoria.ip2sec.com.br/mcp \
+curl -si https://memoria.SEU.DOMINIO/mcp \
   -H "CF-Access-Client-Id: ...access" -H "CF-Access-Client-Secret: ..." | head -1
 
 # 4. projeto fora do registro -> 400/403
-curl -si https://memoria.ip2sec.com.br/mcp \
+curl -si https://memoria.SEU.DOMINIO/mcp \
   -H "CF-Access-Client-Id: ...access" -H "CF-Access-Client-Secret: ..." \
   -H "X-Project-Id: nao-registrado" | head -1
 ```
