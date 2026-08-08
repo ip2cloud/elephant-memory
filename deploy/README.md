@@ -4,32 +4,36 @@ Segue o padrão do `stack-ouro-mcp.yml`: imagem no GHCR, redes externas, secrets
 do Swarm com convenção `*_FILE`, exposição 100% via Cloudflare Tunnel — sem
 porta publicada, sem label de Traefik.
 
+Repositório: `git@github.com:ip2cloud/elephant-memory.git`
+
 ## Bloqueio atual
 
-**A imagem não existe ainda.** O stack referencia
-`ghcr.io/${GHCR_OWNER}/graphiti-memory:${GRAPHITI_MEM_TAG}`; enquanto ela não
-estiver no registry, o deploy falha em `image pull`. Passo 1 abaixo resolve.
+**A imagem não existe no registry.** O stack referencia
+`ghcr.io/ip2cloud/elephant-memory:${ELEPHANT_TAG}`; sem ela, o deploy falha em
+`image pull`. O passo 1 resolve.
 
-## 1. Build e push
+## 1. Publicar a imagem
+
+Pelo CI (`.github/workflows/publish.yml`):
 
 ```bash
-export GHCR_OWNER=ip2cloud
-export TAG=0.1.0
-
-echo $GITHUB_TOKEN | docker login ghcr.io -u <seu-usuario> --password-stdin
-docker build -t ghcr.io/$GHCR_OWNER/graphiti-memory:$TAG .
-docker push ghcr.io/$GHCR_OWNER/graphiti-memory:$TAG
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
-Se o build for num Mac ARM e o Swarm for x86:
+O workflow roda a validação de configuração, valida o YAML do stack, builda
+para `linux/amd64` e publica. O **digest** sai no summary do job — é ele que vai
+no registro de evidência, não a tag: tag pode ser movida, digest não.
+
+Na mão, se preferir (Mac ARM contra Swarm x86 exige o `--platform`):
 
 ```bash
 docker buildx build --platform linux/amd64 \
-  -t ghcr.io/$GHCR_OWNER/graphiti-memory:$TAG --push .
+  -t ghcr.io/ip2cloud/elephant-memory:0.1.0 --push .
 ```
 
-Não use `latest`. O rebuild do grafo depende de versão fixa: trocar a imagem
-muda o resultado da extração a partir dos mesmos eventos.
+Não existe `latest`, de propósito. O rebuild do grafo depende de versão fixa:
+trocar a imagem muda o resultado da extração a partir dos mesmos eventos, e
+`latest` apagaria a rastreabilidade do que gerou o grafo que está no ar.
 
 ## 2. Recursos externos, uma vez
 
@@ -37,8 +41,8 @@ As redes já existem (`network_swarm_public`, `network_swarm_databases`). Faltam
 os secrets:
 
 ```bash
-printf '%s' 'sk-...'            | docker secret create graphiti_openai_key -
-openssl rand -base64 24 | tr -d '\n' | docker secret create graphiti_falkordb_password -
+printf '%s' 'sk-...'            | docker secret create elephant_openai_key -
+openssl rand -base64 24 | tr -d '\n' | docker secret create elephant_falkordb_password -
 ```
 
 `printf` em vez de `echo`: o newline do `echo` entra no secret e vira senha
@@ -46,9 +50,9 @@ errada sem nenhuma mensagem que explique.
 
 ## 3. Cloudflare Zero Trust
 
-1. **Tunnel** → Public Hostname: `memoria.ip2sec.com.br` → `http://graphiti-mcp:8080`
+1. **Tunnel** → Public Hostname: `memoria.ip2sec.com.br` → `http://elephant-mcp:8080`
 2. **Access** → Application no mesmo hostname, policy **Service Auth**
-3. Anote o **Application Audience (AUD)** → vai em `GRAPHITI_MEM_CF_AUD`
+3. Anote o **Application Audience (AUD)** → vai em `ELEPHANT_CF_AUD`
 4. Crie os service tokens, um por papel:
 
 | Token | Grants | Onde vive |
@@ -66,12 +70,12 @@ vale lembrete no calendário.
 ## 4. Variáveis no Portainer
 
 ```
-GHCR_OWNER            ip2cloud
-GRAPHITI_MEM_TAG      0.1.0
-CF_ACCESS_TEAM_DOMAIN ip2sec.cloudflareaccess.com
-GRAPHITI_MEM_CF_AUD   <AUD da Access App>
-PROJECTS              ["scout-manager"]
-CF_ACCESS_GRANTS      {"repo-scout":["read:scout-manager"],"alfredo-pessoal":["read:scout-manager","write:scout-manager"],"publicador-scout":["read:scout-manager","ingest:scout-manager"]}
+GHCR_OWNER             ip2cloud
+ELEPHANT_TAG           0.1.0
+CF_ACCESS_TEAM_DOMAIN  ip2sec.cloudflareaccess.com
+ELEPHANT_CF_AUD        <AUD da Access App>
+PROJECTS               ["scout-manager"]
+CF_ACCESS_GRANTS       {"repo-scout":["read:scout-manager"],"alfredo-pessoal":["read:scout-manager","write:scout-manager"],"publicador-scout":["read:scout-manager","ingest:scout-manager"]}
 ```
 
 O boot **recusa subir** se algum grant apontar para projeto fora de `PROJECTS`.
@@ -80,11 +84,19 @@ tardia.
 
 ## 5. Deploy
 
-Portainer → Stacks → Add stack → nome `graphiti-memory`, compose path
-`deploy/stack-graphiti-memory.yml`. Ou:
+Portainer → Stacks → Add stack → **Repository**, no padrão do `ouro-mcp`:
+
+```
+Repository URL  git@github.com:ip2cloud/elephant-memory.git
+Compose path    deploy/stack-elephant-memory.yml
+Reference       refs/heads/main
+Auto update     Webhook (push → redeploy)
+```
+
+Ou pela CLI:
 
 ```bash
-docker stack deploy -c deploy/stack-graphiti-memory.yml graphiti-memory --with-registry-auth
+docker stack deploy -c deploy/stack-elephant-memory.yml elephant-memory --with-registry-auth
 ```
 
 ## 6. Verificação, nesta ordem
@@ -132,7 +144,7 @@ reagendamento para outro nó troca o volume por um vazio, e o grafo "some".
 
 ## Pendências antes de considerar produção
 
-- repositório com tag imutável e digest da imagem registrado
+- registrar o digest da imagem publicada (sai no summary do CI)
 - procedimento de restore do ledger e do volume do FalkorDB, ensaiado
 - alerta de expiração dos service tokens
 - varredura periódica de auditoria do grafo (segredo/PII que tenha passado)

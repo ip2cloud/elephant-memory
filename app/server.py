@@ -50,7 +50,7 @@ logger = logging.getLogger("graphmem")
 hydrate_env()
 
 mcp = FastMCP(
-    "graphiti-memory",
+    "elephant-memory",
     instructions=(
         "Memoria de longo prazo em grafo temporal, isolada por projeto. O projeto "
         "atual vem da conexao — voce NAO precisa e NAO deve informa-lo, exceto "

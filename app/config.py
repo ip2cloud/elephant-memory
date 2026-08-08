@@ -3,7 +3,7 @@
 Convencao da infra: segredo nao vai em variavel de ambiente, vai em
 `/run/secrets/<nome>` e a variavel aponta para o arquivo:
 
-    OPENAI_API_KEY_FILE: /run/secrets/graphiti_openai_key
+    OPENAI_API_KEY_FILE: /run/secrets/elephant_openai_key
 
 Motivo pratico: variavel de ambiente vaza em `docker inspect`, em log de
 crash e na UI do Portainer. Arquivo de secret nao.

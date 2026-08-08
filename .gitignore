@@ -9,6 +9,10 @@
 # (remova esta linha se quiser versiona-lo)
 docker-compose.local.yml
 
+# Area de descarte. Guardar copia velha aqui e versiona-la junto seria pior
+# que apagar: vira uma segunda fonte de verdade que ninguem mantem.
+_to_delete/
+
 __pycache__/
 *.py[cod]
 .venv/

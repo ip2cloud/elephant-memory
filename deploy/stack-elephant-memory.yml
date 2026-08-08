@@ -1,22 +1,22 @@
-# stack-graphiti-memory.yml — memoria em grafo, isolada por projeto
+# stack-elephant-memory.yml — memoria em grafo, isolada por projeto
 #
 # Segue o padrao do stack-ouro-mcp.yml: imagem no GHCR, redes externas,
 # segredos do Swarm com convencao *_FILE, exposicao 100% via Cloudflare Tunnel
 # (sem porta publicada, sem label de Traefik).
 #
 # Deploy GitOps via Portainer -> Stacks -> Add -> Repository:
-#   Compose path = deploy/stack-graphiti-memory.yml
+#   Compose path = deploy/stack-elephant-memory.yml
 #   Reference    = refs/heads/main    Auto update = Webhook
-# CLI: docker stack deploy -c deploy/stack-graphiti-memory.yml graphiti-memory --with-registry-auth
+# CLI: docker stack deploy -c deploy/stack-elephant-memory.yml elephant-memory --with-registry-auth
 #
-# Validar: python -c "import yaml; yaml.safe_load(open('deploy/stack-graphiti-memory.yml'))"
+# Validar: python -c "import yaml; yaml.safe_load(open('deploy/stack-elephant-memory.yml'))"
 #
 # ── Env vars (Portainer) ─────────────────────────────────────────────────────
 #   GHCR_OWNER              dono do registry (ex: ip2cloud)
-#   GRAPHITI_MEM_TAG        tag da imagem (ex: 0.1.0). NAO use `latest`:
+#   ELEPHANT_TAG        tag da imagem (ex: 0.1.0). NAO use `latest`:
 #                           o rebuild do grafo depende de versao fixa
 #   CF_ACCESS_TEAM_DOMAIN   ip2sec.cloudflareaccess.com
-#   GRAPHITI_MEM_CF_AUD     Application Audience da Access App desta memoria
+#   ELEPHANT_CF_AUD     Application Audience da Access App desta memoria
 #   PROJECTS                registro de projetos, JSON. Ex: ["scout-manager"]
 #   CF_ACCESS_GRANTS        identidade -> grants. Ex:
 #     {"publicador-scout":["read:scout-manager","ingest:scout-manager"],
@@ -24,13 +24,13 @@
 #
 # ── Recursos externos (criar 1x) ─────────────────────────────────────────────
 #   Redes:   network_swarm_public (ja existe), network_swarm_databases (ja existe)
-#   Secrets: graphiti_openai_key, graphiti_falkordb_password
-#     docker secret create graphiti_openai_key -
-#     docker secret create graphiti_falkordb_password -
+#   Secrets: elephant_openai_key, elephant_falkordb_password
+#     docker secret create elephant_openai_key -
+#     docker secret create elephant_falkordb_password -
 #   Registry: credenciais do GHCR no Portainer + --with-registry-auth
 #
 # ── Cloudflare Tunnel: 1 Public Hostname ─────────────────────────────────────
-#   memoria.ip2sec.com.br -> http://graphiti-mcp:8080
+#   memoria.ip2sec.com.br -> http://elephant-mcp:8080
 #   Access Application com policy **Service Auth** e service tokens.
 #   Sem Access na frente, o servidor ainda recusa: ele valida o JWT por conta
 #   propria (AUTH_MODE=cloudflare). Defesa em profundidade, nao redundancia.
@@ -46,15 +46,15 @@ networks:
     external: true
 
 secrets:
-  graphiti_openai_key:
+  elephant_openai_key:
     external: true
-  graphiti_falkordb_password:
+  elephant_falkordb_password:
     external: true
 
 volumes:
-  graphiti_falkor_data:
+  elephant_falkor_data:
     external: false
-  graphiti_ledger_data:
+  elephant_ledger_data:
     external: false
 
 services:
@@ -69,7 +69,7 @@ services:
   # ---------------------------------------------------------------------------
   falkordb:
     image: falkordb/falkordb:v4.14.2
-    hostname: graphiti-falkordb
+    hostname: elephant-falkordb
     environment:
       # A imagem tem ENTRYPOINT proprio (run.sh) que monta a linha do
       # redis-server a partir de REDIS_ARGS/FALKORDB_ARGS. Um `command:` aqui
@@ -85,11 +85,11 @@ services:
       BROWSER: "0"
     volumes:
       # O run.sh usa --dir /var/lib/falkordb/data. Montar em /data nao persiste.
-      - graphiti_falkor_data:/var/lib/falkordb/data
+      - elephant_falkor_data:/var/lib/falkordb/data
     networks:
       network_swarm_databases:
         aliases:
-          - graphiti-falkordb
+          - elephant-falkordb
     healthcheck:
       # Afirma as DUAS coisas: responde E exige senha. So `redis-cli -a X ping`
       # devolve PONG num servidor aberto (o AUTH falha, o PING responde), e o
@@ -124,19 +124,19 @@ services:
         max_attempts: 5
 
   # ---------------------------------------------------------------------------
-  # graphiti-mcp — MCP + endpoint REST /ingest.
+  # elephant-mcp — MCP + endpoint REST /ingest.
   #
   # UM servico so, sempre autenticado. O stack-ouro-mcp tem um par
   # interno/publico, e aqui isso seria um furo: toda a permissao deste servidor
   # e por credencial (`read:projeto`, `write:projeto`, `ingest:projeto`). Um
   # gemeo interno "que confia na rede" contornaria o modelo inteiro.
   # ---------------------------------------------------------------------------
-  graphiti-mcp:
-    image: ghcr.io/${GHCR_OWNER}/graphiti-memory:${GRAPHITI_MEM_TAG}
+  elephant-mcp:
+    image: ghcr.io/${GHCR_OWNER}/elephant-memory:${ELEPHANT_TAG}
     environment:
       AUTH_MODE: cloudflare
       CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN}
-      CF_ACCESS_AUD: ${GRAPHITI_MEM_CF_AUD}
+      CF_ACCESS_AUD: ${ELEPHANT_CF_AUD}
       CF_ACCESS_IDENTITY_CLAIM: common_name
       # Identidade -> grants. Sem este repasse, `grants` fica vazio, toda
       # identidade cai sem permissao nenhuma e o servidor sobe inerte.
@@ -145,12 +145,12 @@ services:
       # subir se algum grant apontar para projeto fora daqui.
       PROJECTS: ${PROJECTS}
 
-      FALKORDB_HOST: graphiti-falkordb
+      FALKORDB_HOST: elephant-falkordb
       FALKORDB_PORT: "6379"
-      FALKORDB_PASSWORD_FILE: /run/secrets/graphiti_falkordb_password
+      FALKORDB_PASSWORD_FILE: /run/secrets/elephant_falkordb_password
       FALKORDB_DATABASE: memoria
 
-      OPENAI_API_KEY_FILE: /run/secrets/graphiti_openai_key
+      OPENAI_API_KEY_FILE: /run/secrets/elephant_openai_key
       # Fixos para o rebuild ser reproduzivel. Trocar qualquer um produz outro
       # grafo a partir dos mesmos eventos.
       MEM_LLM_MODEL: gpt-4o-mini
@@ -162,17 +162,17 @@ services:
       LOG_LEVEL: INFO
       GRAPHITI_TELEMETRY_ENABLED: "false"
     secrets:
-      - graphiti_openai_key
-      - graphiti_falkordb_password
+      - elephant_openai_key
+      - elephant_falkordb_password
     volumes:
       # O ledger e ESTADO: guarda o par (decisao -> episodio) e o que foi
       # substituido ou retratado. Sem volume, o restart republica tudo e a
       # invalidacao some.
-      - graphiti_ledger_data:/data
+      - elephant_ledger_data:/data
     networks:
       network_swarm_public:
         aliases:
-          - graphiti-mcp
+          - elephant-mcp
       network_swarm_databases: {}
     healthcheck:
       # python urllib: nao ha curl na imagem python:3.12-slim.
