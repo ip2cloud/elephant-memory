@@ -1,0 +1,217 @@
+# stack-graphiti-memory.yml — memoria em grafo, isolada por projeto
+#
+# Segue o padrao do stack-ouro-mcp.yml: imagem no GHCR, redes externas,
+# segredos do Swarm com convencao *_FILE, exposicao 100% via Cloudflare Tunnel
+# (sem porta publicada, sem label de Traefik).
+#
+# Deploy GitOps via Portainer -> Stacks -> Add -> Repository:
+#   Compose path = deploy/stack-graphiti-memory.yml
+#   Reference    = refs/heads/main    Auto update = Webhook
+# CLI: docker stack deploy -c deploy/stack-graphiti-memory.yml graphiti-memory --with-registry-auth
+#
+# Validar: python -c "import yaml; yaml.safe_load(open('deploy/stack-graphiti-memory.yml'))"
+#
+# ── Env vars (Portainer) ─────────────────────────────────────────────────────
+#   GHCR_OWNER              dono do registry (ex: ip2cloud)
+#   GRAPHITI_MEM_TAG        tag da imagem (ex: 0.1.0). NAO use `latest`:
+#                           o rebuild do grafo depende de versao fixa
+#   CF_ACCESS_TEAM_DOMAIN   ip2sec.cloudflareaccess.com
+#   GRAPHITI_MEM_CF_AUD     Application Audience da Access App desta memoria
+#   PROJECTS                registro de projetos, JSON. Ex: ["scout-manager"]
+#   CF_ACCESS_GRANTS        identidade -> grants. Ex:
+#     {"publicador-scout":["read:scout-manager","ingest:scout-manager"],
+#      "alfredo-pessoal":["read:scout-manager","write:scout-manager"]}
+#
+# ── Recursos externos (criar 1x) ─────────────────────────────────────────────
+#   Redes:   network_swarm_public (ja existe), network_swarm_databases (ja existe)
+#   Secrets: graphiti_openai_key, graphiti_falkordb_password
+#     docker secret create graphiti_openai_key -
+#     docker secret create graphiti_falkordb_password -
+#   Registry: credenciais do GHCR no Portainer + --with-registry-auth
+#
+# ── Cloudflare Tunnel: 1 Public Hostname ─────────────────────────────────────
+#   memoria.ip2sec.com.br -> http://graphiti-mcp:8080
+#   Access Application com policy **Service Auth** e service tokens.
+#   Sem Access na frente, o servidor ainda recusa: ele valida o JWT por conta
+#   propria (AUTH_MODE=cloudflare). Defesa em profundidade, nao redundancia.
+
+version: "3.8"
+
+networks:
+  # Por onde o cloudflared alcanca o MCP.
+  network_swarm_public:
+    external: true
+  # Por onde o MCP alcanca o FalkorDB. O banco NAO entra na rede publica.
+  network_swarm_databases:
+    external: true
+
+secrets:
+  graphiti_openai_key:
+    external: true
+  graphiti_falkordb_password:
+    external: true
+
+volumes:
+  graphiti_falkor_data:
+    external: false
+  graphiti_ledger_data:
+    external: false
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # falkordb — grafo. Um grafo do FalkorDB por projeto (group_id), entao o
+  # isolamento entre projetos e fisico, nao um WHERE.
+  #
+  # Instancia dedicada de proposito. O `neo4j` da stack vizinha e Community
+  # Edition — banco unico — e ja e usado pelos fluxos do n8n; misturar a memoria
+  # dos agentes com aquele grafo juntaria dois raios de dano sem necessidade.
+  # ---------------------------------------------------------------------------
+  falkordb:
+    image: falkordb/falkordb:v4.14.2
+    hostname: graphiti-falkordb
+    environment:
+      # A imagem tem ENTRYPOINT proprio (run.sh) que monta a linha do
+      # redis-server a partir de REDIS_ARGS/FALKORDB_ARGS. Um `command:` aqui
+      # e DESCARTADO EM SILENCIO — e o efeito e banco sem senha, sem
+      # persistencia e com healthcheck verde por cima disso.
+      REDIS_ARGS: >-
+        --requirepass ${FALKORDB_PASSWORD}
+        --appendonly yes
+        --save 60 1
+      FALKORDB_ARGS: THREAD_COUNT 4
+      # A variavel e BROWSER, nao FALKORDB_BROWSER: o run.sh testa ${BROWSER:-1}.
+      # Com o nome errado a UI Next.js sobe na 3000 do mesmo jeito.
+      BROWSER: "0"
+    volumes:
+      # O run.sh usa --dir /var/lib/falkordb/data. Montar em /data nao persiste.
+      - graphiti_falkor_data:/var/lib/falkordb/data
+    networks:
+      network_swarm_databases:
+        aliases:
+          - graphiti-falkordb
+    healthcheck:
+      # Afirma as DUAS coisas: responde E exige senha. So `redis-cli -a X ping`
+      # devolve PONG num servidor aberto (o AUTH falha, o PING responde), e o
+      # healthcheck ficaria verde num banco sem autenticacao.
+      test:
+        - CMD-SHELL
+        - >-
+          redis-cli ping 2>&1 | grep -q NOAUTH &&
+          redis-cli -a "$$FALKORDB_PASSWORD" --no-auth-warning ping | grep -q PONG
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          # Volume local: fixa num no estavel, senao um reagendamento troca o
+          # volume por um vazio e o grafo "some".
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.10"
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  # ---------------------------------------------------------------------------
+  # graphiti-mcp — MCP + endpoint REST /ingest.
+  #
+  # UM servico so, sempre autenticado. O stack-ouro-mcp tem um par
+  # interno/publico, e aqui isso seria um furo: toda a permissao deste servidor
+  # e por credencial (`read:projeto`, `write:projeto`, `ingest:projeto`). Um
+  # gemeo interno "que confia na rede" contornaria o modelo inteiro.
+  # ---------------------------------------------------------------------------
+  graphiti-mcp:
+    image: ghcr.io/${GHCR_OWNER}/graphiti-memory:${GRAPHITI_MEM_TAG}
+    environment:
+      AUTH_MODE: cloudflare
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN}
+      CF_ACCESS_AUD: ${GRAPHITI_MEM_CF_AUD}
+      CF_ACCESS_IDENTITY_CLAIM: common_name
+      # Identidade -> grants. Sem este repasse, `grants` fica vazio, toda
+      # identidade cai sem permissao nenhuma e o servidor sobe inerte.
+      CF_ACCESS_GRANTS: ${CF_ACCESS_GRANTS}
+      # Registro de projetos: a autoridade sobre o que existe. O boot RECUSA
+      # subir se algum grant apontar para projeto fora daqui.
+      PROJECTS: ${PROJECTS}
+
+      FALKORDB_HOST: graphiti-falkordb
+      FALKORDB_PORT: "6379"
+      FALKORDB_PASSWORD_FILE: /run/secrets/graphiti_falkordb_password
+      FALKORDB_DATABASE: memoria
+
+      OPENAI_API_KEY_FILE: /run/secrets/graphiti_openai_key
+      # Fixos para o rebuild ser reproduzivel. Trocar qualquer um produz outro
+      # grafo a partir dos mesmos eventos.
+      MEM_LLM_MODEL: gpt-4o-mini
+      MEM_EMBED_MODEL: text-embedding-3-small
+
+      LEDGER_DB: /data/ledger.db
+      RATE_LIMIT: "120"
+      RATE_WINDOW: "60"
+      LOG_LEVEL: INFO
+      GRAPHITI_TELEMETRY_ENABLED: "false"
+    secrets:
+      - graphiti_openai_key
+      - graphiti_falkordb_password
+    volumes:
+      # O ledger e ESTADO: guarda o par (decisao -> episodio) e o que foi
+      # substituido ou retratado. Sem volume, o restart republica tudo e a
+      # invalidacao some.
+      - graphiti_ledger_data:/data
+    networks:
+      network_swarm_public:
+        aliases:
+          - graphiti-mcp
+      network_swarm_databases: {}
+    healthcheck:
+      # python urllib: nao ha curl na imagem python:3.12-slim.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=4).status==200 else 1)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      mode: replicated
+      # NAO escale para 2 sem antes tratar dois estados de processo: o ledger
+      # (SQLite em volume local) e o rate limiter (em memoria, por replica).
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 768M
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        # start-first exigiria dois containers no mesmo volume do ledger.
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 0s
+        failure_action: pause

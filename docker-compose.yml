@@ -1,0 +1,103 @@
+services:
+  falkordb:
+    image: falkordb/falkordb:v4.14.2
+    restart: unless-stopped
+    # Sem `ports:` — so o mcp fala com ele, pela rede interna.
+    expose:
+      - "6379"
+    # NAO use `command:` aqui. A imagem tem ENTRYPOINT proprio (run.sh) que monta
+    # a linha do redis-server a partir de REDIS_ARGS/FALKORDB_ARGS — um `command:`
+    # e descartado EM SILENCIO. Custava tres coisas de uma vez: o banco subia sem
+    # senha, nada persistia (o run.sh usa --dir /var/lib/falkordb/data, nao /data)
+    # e o healthcheck ficava verde assim mesmo.
+    environment:
+      FALKORDB_PASSWORD: ${FALKORDB_PASSWORD:?defina FALKORDB_PASSWORD no .env}
+      REDIS_ARGS: >-
+        --requirepass ${FALKORDB_PASSWORD}
+        --appendonly yes
+        --save 60 1
+      FALKORDB_ARGS: THREAD_COUNT 4
+      # A imagem sobe uma UI Next.js na 3000. Nao precisamos dela, e ela e
+      # superficie a mais no dia que alguem publicar a porta.
+      # A variavel e BROWSER, nao FALKORDB_BROWSER: o run.sh testa ${BROWSER:-1}.
+      # Com o nome errado a UI sobe do mesmo jeito, silenciosamente.
+      BROWSER: "0"
+    volumes:
+      - falkor_data:/var/lib/falkordb/data
+    networks: [internal]
+    healthcheck:
+      # Afirma as DUAS coisas: responde, e EXIGE senha. Só `redis-cli -a senha
+      # ping` nao serve — num servidor aberto o AUTH falha mas o PING responde
+      # PONG, e o healthcheck fica verde num banco sem autenticacao.
+      test:
+        - CMD-SHELL
+        - >-
+          redis-cli ping 2>&1 | grep -q NOAUTH &&
+          redis-cli -a "$$FALKORDB_PASSWORD" --no-auth-warning ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  mcp:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?defina OPENAI_API_KEY no .env}
+      # Registro de projetos — a autoridade sobre o que existe. ID fora daqui
+      # falha, sem criar grafo. Criar projeto e ato administrativo.
+      PROJECTS: ${PROJECTS:-}
+      AUTH_MODE: ${AUTH_MODE:-cloudflare}
+      # AUTH_MODE=cloudflare
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
+      CF_ACCESS_IDENTITY_CLAIM: ${CF_ACCESS_IDENTITY_CLAIM:-common_name}
+      # Escopos por identidade. SEM este repasse, `grants` fica vazio, toda
+      # identidade cai em DEFAULT_SCOPES e o servidor sobe somente-leitura para
+      # todo mundo — em silencio, e o sintoma parece erro de permissao do
+      # Access. Ver o teste `toda variavel lida pelo app e repassada no compose`.
+      CF_ACCESS_GRANTS: ${CF_ACCESS_GRANTS:-}
+      # AUTH_MODE=token (so para rodar local sem Cloudflare)
+      AUTH_TOKENS: ${AUTH_TOKENS:-}
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      FALKORDB_PASSWORD: ${FALKORDB_PASSWORD}
+      FALKORDB_DATABASE: ${FALKORDB_DATABASE:-memoria}
+      # O ledger de publicacao e ESTADO. Sem volume, ele zera no restart e
+      # todo handoff ja publicado e republicado (custo de LLM em dobro).
+      LEDGER_DB: /data/ledger.db
+      RATE_LIMIT: ${RATE_LIMIT:-120}
+      RATE_WINDOW: ${RATE_WINDOW:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    networks: [internal, edge]
+    volumes:
+      - ledger_data:/data
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  # Sem porta publica, sem IP publico, sem certificado pra gerenciar.
+  # O tunel abre conexao DE DENTRO pra fora — nao existe origin pra contornar,
+  # que e a unica forma de "atras da Cloudflare" ser fronteira de verdade.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.2.1
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN:?defina CF_TUNNEL_TOKEN no .env}
+    depends_on:
+      - mcp
+    networks: [edge]
+
+networks:
+  internal:
+    internal: true
+  edge:
+
+volumes:
+  falkor_data:
+  ledger_data:

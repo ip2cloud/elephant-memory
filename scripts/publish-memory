@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Publicador do handoff — copie para `.ia/bin/publish-memory` no seu repo.
+
+Lê o evento apontado por `.ia/memory/episodic/index.yaml`, extrai as decisões e
+publica em `POST /ingest`. É este script que decide o que vai; o modelo apenas
+executa o comando.
+
+    ./publish-memory                 # publica o evento corrente
+    ./publish-memory --dry-run       # mostra o payload, não envia
+    ./publish-memory --backfill      # varre events/ e publica o que faltar
+
+Variáveis:
+    MEM_URL             https://memoria.SEU.DOMINIO/ingest
+    MEM_PROJECT         opcional; default vem de .ia/project.yaml
+    CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET   (produção)
+    MEM_TOKEN           (modo local)
+
+DECISÕES EM FRONTMATTER, não em tabela markdown. O parser aceita:
+
+    decisions:
+      - decision_id: "DEC-000012-01"     # único e imutável no projeto
+        operation: add                    # add | supersede | retract
+        statement: "Usar RabbitMQ como broker"
+        rationale: "a equipe já opera RabbitMQ"
+        authority_refs: ["docs/plan.md"]
+        target_decision_id: null          # exigido em supersede e retract
+
+Publicação é controlada por `.ia/project.yaml`:
+
+    memory:
+      graph_ingestion: disabled   # padrão. `enabled` autoriza publicar.
+
+A tabela markdown é deliberadamente NÃO suportada: escaping de `|`, célula
+multilinha e normalização Unicode tornam o parser não-determinístico, e
+deduplicação depende de hash estável. Gere a tabela a partir do frontmatter,
+não o contrário.
+
+Falha é não-bloqueante: sai com 0 e apenas registra. O handoff está completo
+sem isto.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print("publish-memory: precisa de PyYAML (pip install pyyaml)", file=sys.stderr)
+    raise SystemExit(0)
+
+IA = Path(".ia")
+EPISODIC = IA / "memory" / "episodic"
+
+
+def log(msg: str) -> None:
+    print(f"publish-memory: {msg}", file=sys.stderr)
+
+
+def read_frontmatter(path: Path) -> tuple[dict, str]:
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return {}, text
+    _, _, rest = text.partition("---\n")
+    front, sep, body = rest.partition("\n---")
+    if not sep:
+        return {}, text
+    return yaml.safe_load(front) or {}, body
+
+
+def ingestion_enabled() -> bool:
+    """Publicar exige autorizacao explicita.
+
+    O publisher existir nao ativa publicacao. Enquanto o corpus esta sendo
+    coletado localmente, isto fica `disabled` e o script vira no-op.
+    """
+    cfg = IA / "project.yaml"
+    if not cfg.is_file():
+        return False
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    valor = str(((data.get("memory") or {}).get("graph_ingestion")) or "disabled")
+    return valor.strip().lower() == "enabled"
+
+
+def record_pending(event: Path, project: str, decision_ids: list[str], motivo: str) -> None:
+    """Registro local de pendencia — SEM o conteudo da decisao.
+
+    "Sair com 0" nao pode fazer a falha sumir da observabilidade. Guarda so
+    evento, IDs, horario e motivo tecnico.
+    """
+    import datetime
+    destino = IA / "memory" / "publication-pending.jsonl"
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    linha = {
+        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "event": event.name,
+        "project": project,
+        "decision_ids": decision_ids,
+        "reason": motivo,
+        "status": "handoff_committed_publication_pending",
+    }
+    with destino.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(linha, ensure_ascii=False) + "\n")
+
+
+def project_id() -> str:
+    explicit = os.environ.get("MEM_PROJECT", "").strip()
+    if explicit:
+        return explicit
+    cfg = IA / "project.yaml"
+    if cfg.is_file():
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        pid = str(data.get("project_id") or "").strip()
+        if pid:
+            return pid
+    raise SystemExit(
+        "publish-memory: defina `project_id` em .ia/project.yaml ou exporte MEM_PROJECT."
+    )
+
+
+def auth_headers() -> dict[str, str]:
+    cid = os.environ.get("CF_ACCESS_CLIENT_ID", "").strip()
+    secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "").strip()
+    if cid and secret:
+        return {"CF-Access-Client-Id": cid, "CF-Access-Client-Secret": secret}
+    token = os.environ.get("MEM_TOKEN", "").strip()
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    raise SystemExit(
+        "publish-memory: exporte CF_ACCESS_CLIENT_ID + CF_ACCESS_CLIENT_SECRET, ou MEM_TOKEN."
+    )
+
+
+def current_event() -> Path:
+    index = EPISODIC / "index.yaml"
+    if not index.is_file():
+        raise SystemExit(f"publish-memory: {index} nao encontrado.")
+    data = yaml.safe_load(index.read_text(encoding="utf-8")) or {}
+    rel = (((data.get("latest") or {}).get("path")) or "").strip()
+    if not rel:
+        raise SystemExit("publish-memory: index.yaml sem latest.path.")
+    path = Path(rel)
+    if not path.is_absolute() and not path.exists():
+        path = EPISODIC / Path(rel).name
+    if not path.is_file():
+        raise SystemExit(f"publish-memory: evento {rel} nao encontrado.")
+    return path
+
+
+def build_payload(event: Path, project: str) -> dict | None:
+    front, _ = read_frontmatter(event)
+    decisions = front.get("decisions") or []
+    if not isinstance(decisions, list) or not decisions:
+        log(f"{event.name}: sem `decisions` no frontmatter — nada a publicar")
+        return None
+
+    clean = []
+    for item in decisions:
+        if not isinstance(item, dict) or not str(item.get("decision_id") or "").strip():
+            continue
+        refs = item.get("authority_refs") or []
+        if isinstance(refs, str):
+            refs = [refs]
+        clean.append({
+            "decision_id": str(item.get("decision_id") or "").strip(),
+            "operation": str(item.get("operation") or "add").strip().lower(),
+            "statement": (str(item["statement"]).strip()
+                          if item.get("statement") is not None else None),
+            "rationale": str(item.get("rationale") or "").strip() or None,
+            "authority_refs": [str(r).strip() for r in refs if str(r).strip()],
+            "target_decision_id": str(item.get("target_decision_id") or "").strip() or None,
+        })
+
+    if not clean:
+        return None
+
+    return {
+        "project": project,
+        "source": {
+            "event_id": front.get("event_id"),
+            "sequence": front.get("sequence"),
+            "content_version": front.get("content_version"),
+            "created_at": front.get("created_at"),
+            "from_agent": front.get("from_agent"),
+            "status": front.get("status", "ready"),
+            "branch": os.popen("git rev-parse --abbrev-ref HEAD 2>/dev/null").read().strip(),
+        },
+        "decisions": clean,
+    }
+
+
+def post(url: str, payload: dict) -> dict:
+    # O projeto vai no HEADER, como em todo o resto do servidor: o escopo vem
+    # do transporte, nao do corpo. O `project` do payload e conferencia — o
+    # servidor recusa se os dois divergirem.
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Project-Id": payload["project"],
+            **auth_headers(),
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=180) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def publish(event: Path, project: str, url: str, dry: bool) -> None:
+    payload = build_payload(event, project)
+    if payload is None:
+        return
+    if dry:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    ids = [d["decision_id"] for d in payload["decisions"]]
+    try:
+        result = post(url, payload)
+    except urllib.error.HTTPError as exc:
+        detalhe = exc.read().decode("utf-8", "replace")[:200]
+        log(f"{event.name}: HTTP {exc.code} — {detalhe}")
+        record_pending(event, project, ids, f"http_{exc.code}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        log(f"{event.name}: servidor inacessivel ({exc}). Handoff segue valido.")
+        record_pending(event, project, ids, "unreachable")
+        return
+
+    contagem: dict[str, int] = {}
+    for r in result.get("results", []):
+        contagem[r["status"]] = contagem.get(r["status"], 0) + 1
+    log(f"{event.name}: {contagem or 'nada a publicar'}")
+
+    pendentes = [r["decision_id"] for r in result.get("results", [])
+                 if r["status"] in ("rejected", "failed")]
+    for r in result.get("results", []):
+        if r["status"] in ("rejected", "failed"):
+            log(f"  {r['decision_id']}: {r.get('reason_code')}")
+    if pendentes:
+        record_pending(event, project, pendentes, "rejected_or_failed")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--backfill", action="store_true")
+    args = parser.parse_args()
+
+    url = os.environ.get("MEM_URL", "").strip()
+    if not url and not args.dry_run:
+        raise SystemExit("publish-memory: exporte MEM_URL (ex: https://.../ingest).")
+
+    project = project_id()
+
+    if not args.dry_run and not ingestion_enabled():
+        log("graph_ingestion: disabled em .ia/project.yaml — nada publicado. "
+            "Use --dry-run para inspecionar o payload.")
+        return 0
+
+    if args.backfill:
+        events = sorted((EPISODIC / "events").glob("*.md"))
+        log(f"backfill: {len(events)} evento(s)")
+        for event in events:
+            publish(event, project, url, args.dry_run)
+    else:
+        publish(current_event(), project, url, args.dry_run)
+    return 0
+
+
+if __name__ == "__main__":
+    # Falha nao-bloqueante: o handoff esta completo sem isto.
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log(f"erro inesperado: {exc}")
+        raise SystemExit(0)

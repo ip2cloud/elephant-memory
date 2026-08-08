@@ -1,0 +1,16 @@
+# Versoes fixadas e testadas em conjunto. Tres travas nao-obvias:
+#
+#  * mcp 2.0.0 REMOVEU `mcp.server.fastmcp`. Fica em 1.x.
+#  * redis 8.1.0 quebra o cliente falkordb com
+#      TypeError: Redis.__init__() got an unexpected keyword argument 'himport_registry'
+#    e redis <8 quebra com ModuleNotFoundError: redis.driver_info.
+#    A janela que funciona e 8.0.x. Nao afrouxe este pin sem testar.
+#  * falkordb 1.6.x exige redis>=7.1 mas na pratica so anda no 8.0.x.
+#
+graphiti-core[falkordb]==0.29.3
+falkordb==1.6.2
+redis==8.0.1
+mcp==1.29.0
+uvicorn[standard]==0.52.1
+pyjwt[crypto]==2.13.0
+httpx==0.28.1

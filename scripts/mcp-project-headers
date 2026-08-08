@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# headersHelper do Claude Code: roda na hora de conectar, no diretorio do
+# projeto, e imprime os headers em JSON no stdout.
+#
+# Efeito: UM registro de MCP com --scope user cobre todos os repos, e o
+# project-id continua correto em cada um — sem arquivo por projeto.
+#
+# Instale em ~/.local/bin/mcp-project-headers e registre uma unica vez:
+#   claude mcp add --transport http memoria --scope user https://memoria.SEU.DOMINIO/mcp
+#   # depois edite ~/.claude.json e troque "headers" por:
+#   #   "headersHelper": "~/.local/bin/mcp-project-headers"
+
+set -euo pipefail
+
+cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
+cd "$cwd" 2>/dev/null || true
+
+if remote=$(git remote get-url origin 2>/dev/null) && [[ -n "$remote" ]]; then
+	slug="${remote%.git}"; slug="${slug#*://}"; slug="${slug#*@}"; slug="${slug#*[:/]}"
+	slug="${slug//\//-}"; slug="${slug//:/-}"
+	project=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')
+else
+	project=$(basename "$cwd" | tr '[:upper:]' '[:lower:]')
+fi
+project=$(printf '%s' "$project" | tr -cd 'a-z0-9._-')
+[[ -n "$project" ]] || project="sem-projeto"
+
+# MEM_MODE=token para rodar contra o stack local; cloudflare em producao.
+case "${MEM_MODE:-cloudflare}" in
+token)
+	printf '{"Authorization":"Bearer %s","X-Project-Id":"%s"}\n' \
+		"${MEM_TOKEN:-}" "$project"
+	;;
+*)
+	printf '{"CF-Access-Client-Id":"%s","CF-Access-Client-Secret":"%s","X-Project-Id":"%s"}\n' \
+		"${CF_ACCESS_CLIENT_ID:-}" "${CF_ACCESS_CLIENT_SECRET:-}" "$project"
+	;;
+esac

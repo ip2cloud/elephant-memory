@@ -1,0 +1,17 @@
+# Segredos. O .env tem chave da OpenAI, senha do FalkorDB, tokens de acesso e
+# o token do Cloudflare Tunnel. NUNCA versione. Use o .env.example como molde.
+.env
+.env.*
+!.env.example
+
+# Overlay local: publica portas no loopback e dispensa o Access. Nao e segredo,
+# mas tambem nao e producao — cada maquina escolhe se quer.
+# (remova esta linha se quiser versiona-lo)
+docker-compose.local.yml
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.DS_Store
