@@ -50,6 +50,7 @@ networks:
 secrets:
   elephant_openai_key:
     external: true
+    name: elephant_openai_key_v2
   elephant_falkordb_password:
     external: true
 
@@ -60,7 +61,6 @@ volumes:
     external: false
 
 services:
-
   # ---------------------------------------------------------------------------
   # falkordb — grafo. Um grafo do FalkorDB por projeto (group_id), entao o
   # isolamento entre projetos e fisico, nao um WHERE.
