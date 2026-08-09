@@ -63,6 +63,16 @@ jobs:
           # O Swarm da IP2 e x86. Runner e x86 tambem, entao nao ha emulacao.
           platforms: linux/amd64
           tags: ${{ steps.versao.outputs.imagem }}:${{ steps.versao.outputs.tag }}
+          # `image.source` e o que faz o GHCR VINCULAR o pacote a este
+          # repositorio: sem ele o pacote nasce solto, nao aparece na barra
+          # lateral do repo e a ligacao tem de ser feita na mao depois.
+          # `revision` fecha o circulo do digest: dado um digest, da para
+          # chegar no commit exato que o gerou.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.versao.outputs.tag }}
+            org.opencontainers.image.licenses=NOASSERTION
           # Manifesto simples, sem indice de atestacao: e o que o `docker
           # stack deploy` puxa sem surpresa.
           provenance: false
