@@ -72,15 +72,41 @@ services:
   falkordb:
     image: falkordb/falkordb:v4.14.2
     hostname: elephant-falkordb
+    # A senha do banco vem do MESMO secret que o app le. Antes eram duas
+    # fontes — secret para o app, variavel de ambiente para o banco — que
+    # precisavam ser identicas e nada verificava. A variavel nao existia no
+    # Portainer, `--requirepass ${FALKORDB_PASSWORD}` virou `--requirepass
+    # --appendonly yes`, e o Redis morreu em loop com "wrong number of
+    # arguments". Uma fonte so torna a divergencia impossivel.
+    secrets:
+      - elephant_falkordb_password
+    #
+    # ENTRYPOINT da imagem: ["/var/lib/falkordb/bin/run.sh"], e o run.sh faz
+    #   exec redis-server ${REDIS_ARGS} --protected-mode no \
+    #        --dir "${FALKORDB_DATA_PATH}" --loadmodule .../falkordb.so
+    # Por isso um `command:` aqui e DESCARTADO EM SILENCIO (o CMD da imagem
+    # tambem e): quem monta a linha e o run.sh. Para injetar a senha lida de
+    # arquivo, o unico ponto e o entrypoint.
+    #
+    # `$$` vira `$` dentro do container — sem isso o Swarm tentaria interpolar.
+    #
+    # Arquivo de conf em vez de `--requirepass <senha>` por dois motivos:
+    # argumento de linha de comando aparece em `ps` dentro do container, e o
+    # run.sh expande ${REDIS_ARGS} SEM aspas, entao senha com espaco quebraria
+    # em word splitting. `redis-server <conf> <flags>` e valido: o arquivo vem
+    # primeiro, as flags depois sobrescrevem.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        umask 077;
+        printf 'requirepass "%s"\nappendonly yes\nsave 60 1\n'
+        "$$(cat /run/secrets/elephant_falkordb_password)" > /tmp/falkordb.conf;
+        export REDIS_ARGS=/tmp/falkordb.conf;
+        exec /var/lib/falkordb/bin/run.sh
     environment:
-      # A imagem tem ENTRYPOINT proprio (run.sh) que monta a linha do
-      # redis-server a partir de REDIS_ARGS/FALKORDB_ARGS. Um `command:` aqui
-      # e DESCARTADO EM SILENCIO — e o efeito e banco sem senha, sem
-      # persistencia e com healthcheck verde por cima disso.
-      REDIS_ARGS: >-
-        --requirepass ${FALKORDB_PASSWORD}
-        --appendonly yes
-        --save 60 1
+      # REDIS_ARGS NAO entra aqui: o entrypoint acima o define e sobrescreveria
+      # qualquer valor posto neste bloco, em silencio.
       FALKORDB_ARGS: THREAD_COUNT 4
       # A variavel e BROWSER, nao FALKORDB_BROWSER: o run.sh testa ${BROWSER:-1}.
       # Com o nome errado a UI Next.js sobe na 3000 do mesmo jeito.
@@ -96,11 +122,17 @@ services:
       # Afirma as DUAS coisas: responde E exige senha. So `redis-cli -a X ping`
       # devolve PONG num servidor aberto (o AUTH falha, o PING responde), e o
       # healthcheck ficaria verde num banco sem autenticacao.
+      #
+      # Le do secret, nao de $$FALKORDB_PASSWORD: essa variavel NUNCA existiu
+      # no environment deste servico. Mesmo com a senha do banco corrigida, o
+      # healthcheck autenticaria com string vazia e ficaria vermelho para
+      # sempre — segundo defeito, escondido atras do primeiro.
       test:
         - CMD-SHELL
         - >-
           redis-cli ping 2>&1 | grep -q NOAUTH &&
-          redis-cli -a "$$FALKORDB_PASSWORD" --no-auth-warning ping | grep -q PONG
+          redis-cli -a "$$(cat /run/secrets/elephant_falkordb_password)"
+          --no-auth-warning ping | grep -q PONG
       interval: 30s
       timeout: 10s
       retries: 3
