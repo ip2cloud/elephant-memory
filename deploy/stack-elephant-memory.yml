@@ -15,6 +15,8 @@
 #   GHCR_OWNER              dono do registry (ex: ip2cloud)
 #   ELEPHANT_TAG        tag da imagem (ex: 0.1.0). NAO use `latest`:
 #                           o rebuild do grafo depende de versao fixa
+#   MCP_ALLOWED_HOSTS       o hostname publico do tunel (ex: memoria.SEU.DOMINIO).
+#                           Obrigatoria: sem ela o transporte MCP devolve 421
 #   CF_ACCESS_TEAM_DOMAIN   seutime.cloudflareaccess.com
 #   ELEPHANT_CF_AUD     Application Audience da Access App desta memoria
 #   PROJECTS                registro de projetos, JSON. Ex: ["scout-manager"]
@@ -135,6 +137,13 @@ services:
     image: ghcr.io/${GHCR_OWNER}/elephant-memory:${ELEPHANT_TAG}
     environment:
       AUTH_MODE: cloudflare
+      # Hostname publico do tunel. O SDK do MCP liga protecao contra DNS
+      # rebinding sozinho quando o host do FastMCP fica no default de loopback,
+      # e entao SO aceita Host de loopback. Atras do tunel o Host que chega e o
+      # publico: sem esta lista, TODO request responde 421 "Invalid Host
+      # header" — dentro do transporte, antes do nosso middleware, sem uma
+      # linha no log do container. O boot recusa subir sem ela.
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS}
       CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN}
       CF_ACCESS_AUD: ${ELEPHANT_CF_AUD}
       CF_ACCESS_IDENTITY_CLAIM: common_name

@@ -50,6 +50,12 @@ services:
       # falha, sem criar grafo. Criar projeto e ato administrativo.
       PROJECTS: ${PROJECTS:-}
       AUTH_MODE: ${AUTH_MODE:-cloudflare}
+      # Hostname publico do tunel. O SDK do MCP liga protecao contra DNS
+      # rebinding sozinho e, sem esta lista, so aceita Host de loopback: todo
+      # request que chega pelo Cloudflare responde 421 "Invalid Host header",
+      # antes do nosso middleware e sem log nenhum. Obrigatoria em
+      # AUTH_MODE=cloudflare — o boot recusa subir sem ela.
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
       # AUTH_MODE=cloudflare
       CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
       CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}

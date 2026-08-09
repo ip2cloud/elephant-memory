@@ -71,7 +71,8 @@ vale lembrete no calendário.
 
 ```
 GHCR_OWNER             ip2cloud
-ELEPHANT_TAG           0.1.0
+ELEPHANT_TAG           0.1.1
+MCP_ALLOWED_HOSTS      memoria.SEU.DOMINIO
 CF_ACCESS_TEAM_DOMAIN  seutime.cloudflareaccess.com
 ELEPHANT_CF_AUD        <AUD da Access App>
 PROJECTS               ["scout-manager"]
@@ -81,6 +82,15 @@ CF_ACCESS_GRANTS       {"repo-scout":["read:scout-manager"],"alfredo-pessoal":["
 O boot **recusa subir** se algum grant apontar para projeto fora de `PROJECTS`.
 É proposital: typo em permissão vira erro de inicialização, não descoberta
 tardia.
+
+`MCP_ALLOWED_HOSTS` tem que ser exatamente o hostname do **Public Hostname do
+Tunnel**, e o boot também recusa subir sem ela quando `AUTH_MODE=cloudflare`.
+Motivo: o SDK do MCP liga proteção contra DNS rebinding sozinho quando o host do
+`FastMCP` fica no default de loopback, e aí só aceita `Host` de loopback. Atrás
+do Tunnel o Host que chega é o público, e **todo** request morria em
+`421 Invalid Host header` — dentro do transporte, antes do middleware, sem uma
+linha no log do container. Custou um deploy inteiro para aparecer; o teste
+`Host publico declarado nao vira 421` existe para não custar um segundo.
 
 ## 5. Deploy
 
@@ -121,6 +131,11 @@ curl -si https://memoria.SEU.DOMINIO/mcp \
 ```
 
 O passo 2 é o que importa. Os outros só confirmam que o app está vivo.
+
+**`421` em qualquer passo a partir do 3** significa `MCP_ALLOWED_HOSTS` ausente
+ou diferente do hostname do Tunnel — não é problema de credencial nem de
+projeto. O request nem chegou no nosso código. A partir da 0.1.1 o serviço nem
+sobe sem a variável, então `421` aqui quer dizer valor **errado**, não faltando.
 
 ## Decisões deste stack
 

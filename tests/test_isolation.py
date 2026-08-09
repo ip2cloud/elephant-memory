@@ -42,6 +42,10 @@ os.environ.setdefault("AUTH_TOKENS", json.dumps({
     TOKEN_WRITE: {"user": "alfredo", "scopes": _W},
     TOKEN_INGEST: {"user": "publicador", "scopes": _I},
 }))
+# Hostname publico de mentira, para o Host header do teste ser o mesmo tipo de
+# valor que chega em producao pelo tunel — e nao loopback, que era o ponto cego.
+HOST_PUBLICO = "elephant.exemplo.test"
+os.environ.setdefault("MCP_ALLOWED_HOSTS", HOST_PUBLICO)
 os.environ.setdefault("LEDGER_DB", "/tmp/graphmem-test-ledger.db")
 os.environ.setdefault("FALKORDB_HOST", "127.0.0.1")
 os.environ.setdefault("FALKORDB_PORT", "6379")
@@ -79,24 +83,45 @@ def test_env_passthrough() -> None:
     lidas: set[str] = set()
     app_dir = os.path.join(root, "app")
     for nome in os.listdir(app_dir):
-        if not nome.endswith(".py"):
+        # config.py e quem DEFINE `env`; o que ela le e dinamico (f"{name}_FILE")
+        # e o docstring cita `env("X")` como exemplo. Varrer o proprio helper
+        # so produz nome inventado.
+        if not nome.endswith(".py") or nome == "config.py":
             continue
         with open(os.path.join(app_dir, nome), encoding="utf-8") as fh:
             texto = fh.read()
         lidas |= set(re.findall(r'os\.environ(?:\.get\(|\[)"([A-Z0-9_]+)"', texto))
+        # `env("X")` / `env_required("X")`: desde os secrets do Swarm, este e o
+        # caminho normal de leitura. A versao anterior olhava so `os.environ` e
+        # deixava passar exatamente as variaveis novas.
+        lidas |= set(re.findall(r'\benv(?:_required)?\("([A-Z0-9_]+)"', texto))
 
-    with open(os.path.join(root, "docker-compose.yml"), encoding="utf-8") as fh:
-        compose = fh.read()
-    bloco = compose.split("\n  mcp:")[1].split("\n  cloudflared:")[0]
-    env_bloco = bloco.split("environment:")[1].split("depends_on:")[0]
-    repassadas = set(re.findall(r"^\s{6}([A-Z0-9_]+):", env_bloco, re.M))
+    # So no caminho AUTH_MODE=token, que existe para rodar sem Cloudflare.
+    lidas -= {"AUTH_TOKENS"}
 
-    faltando = sorted(lidas - repassadas)
-    check(
-        "toda variavel lida pelo app e repassada no compose",
-        not faltando,
-        f"faltando: {faltando}",
-    )
+    def repassadas_em(caminho: str, servico: str) -> set[str]:
+        with open(os.path.join(root, caminho), encoding="utf-8") as fh:
+            texto = fh.read()
+        bloco = texto.split(f"\n  {servico}:")[1].split("\n    secrets:")[0]
+        bloco = bloco.split("environment:")[1]
+        for corte in ("depends_on:", "\n    secrets:", "\n    volumes:", "\n    networks:"):
+            bloco = bloco.split(corte)[0]
+        nomes = set(re.findall(r"^\s{6}([A-Z0-9_]+):", bloco, re.M))
+        # `X_FILE` (secret do Swarm) satisfaz `X`: e o que `config.env` le.
+        return nomes | {n[:-5] for n in nomes if n.endswith("_FILE")}
+
+    # Os DOIS arquivos. O compose local nao e o que roda em producao — a
+    # verificacao que so olhava para ele nao cobria o unico deploy real.
+    for caminho, servico in (
+        ("docker-compose.yml", "mcp"),
+        ("deploy/stack-elephant-memory.yml", "elephant-mcp"),
+    ):
+        faltando = sorted(lidas - repassadas_em(caminho, servico))
+        check(
+            f"toda variavel lida pelo app e repassada em {caminho}",
+            not faltando,
+            f"faltando: {faltando}",
+        )
 
 
 def test_env_passthrough_safe() -> None:
@@ -174,13 +199,37 @@ class Lifespan:
 async def test_edge() -> None:
     from app.server import app
 
+    # base_url com o hostname publico: em producao o Host que chega e este, e
+    # era exatamente ele que o SDK recusava. Testar com loopback nao exercita
+    # o caminho que roda.
     async with Lifespan(app), httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://t"
+        transport=httpx.ASGITransport(app=app), base_url=f"https://{HOST_PUBLICO}"
     ) as c:
         auth = {"Authorization": f"Bearer {TOKEN}"}
 
         r = await c.get("/healthz")
         check("healthz sem auth -> 200", r.status_code == 200, f"got {r.status_code}")
+
+        # --- DNS rebinding: o Host publico precisa passar, o desconhecido nao.
+        #
+        # 421 acontece DENTRO do transporte MCP, antes do nosso middleware:
+        # nao gera log nosso, nao aparece em nenhum outro teste, e em producao
+        # o sintoma e "o MCP nao conecta" sem nada no log do container.
+        rebind = {**auth, "X-Project-Id": "proj-alpha"}
+
+        r = await c.post("/mcp", json={}, headers=rebind)
+        check(
+            "Host publico declarado nao vira 421",
+            r.status_code != 421,
+            f"got {r.status_code} — MCP_ALLOWED_HOSTS nao chegou no FastMCP",
+        )
+
+        r = await c.post("/mcp", json={}, headers={**rebind, "Host": "atacante.example"})
+        check(
+            "Host nao declarado -> 421",
+            r.status_code == 421,
+            f"got {r.status_code} — protecao de DNS rebinding esta desligada",
+        )
 
         r = await c.post("/mcp", json={})
         check("sem credencial -> 401", r.status_code == 401, f"got {r.status_code}")

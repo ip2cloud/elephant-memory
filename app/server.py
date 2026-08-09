@@ -15,16 +15,18 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from graphiti_core.nodes import EpisodeType
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 from starlette.responses import JSONResponse
 
 from . import ledger, redaction
-from .config import hydrate_env
+from .config import env, hydrate_env
 from .auth import ScopeMiddleware
 from .graph_store import get_client, shape_fact, shape_node
 from .ingest import handle_ingest
@@ -49,8 +51,58 @@ logger = logging.getLogger("graphmem")
 # OpenAI so olha o ambiente.
 hydrate_env()
 
+# Hosts sempre aceitos: o healthcheck do container bate em 127.0.0.1:8080, e a
+# suite roda sobre ASGI com Host de loopback. Nunca chegam pela internet — o
+# `cloudflared` reescreve o Host com o hostname publico configurado no tunel.
+_HOSTS_LOCAIS = ("127.0.0.1", "localhost", "[::1]")
+
+
+def transport_security() -> TransportSecuritySettings:
+    """Protecao contra DNS rebinding, com o hostname publico declarado.
+
+    O SDK LIGA esta protecao sozinho quando `FastMCP(host=...)` fica no default
+    `127.0.0.1`, e a lista permitida vira so loopback. Atras do Cloudflare
+    Tunnel o Host que chega e o hostname publico, entao TODO request de
+    producao morria em 421 "Invalid Host header" — antes do nosso middleware,
+    antes do registro de projeto, antes de qualquer log nosso.
+
+    Nenhum teste pegava: todos batem no ASGI com Host de loopback, que e
+    justamente o valor permitido. So aparecia com hostname real na frente.
+
+    `MCP_ALLOWED_HOSTS` e obrigatoria em AUTH_MODE=cloudflare, de proposito:
+    o modo cloudflare so existe atras de proxy, e esquecer a variavel voltaria
+    a produzir 421 em producao. Boot que falha e mais barato que 421 mudo.
+    """
+    raw = (env("MCP_ALLOWED_HOSTS") or "").strip()
+    publicos = [h.lower() for h in re.split(r"[,\s]+", raw) if h]
+
+    modo = (os.environ.get("AUTH_MODE", "cloudflare") or "").strip().lower()
+    if modo == "cloudflare" and not publicos:
+        raise RuntimeError(
+            "MCP_ALLOWED_HOSTS nao definido com AUTH_MODE=cloudflare. "
+            "Declare o hostname publico do tunel (ex: "
+            "MCP_ALLOWED_HOSTS=memoria.SEU.DOMINIO). Sem isso o SDK aceita "
+            "apenas Host de loopback e todo request pelo tunel responde 421."
+        )
+
+    hosts = [*publicos, *_HOSTS_LOCAIS]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        # `h:*` cobre Host com porta explicita; `h` cobre sem porta.
+        allowed_hosts=[*hosts, *(f"{h}:*" for h in hosts)],
+        # Origin ausente passa (cliente MCP nao e browser). Quando vier, so
+        # vale o proprio hostname — https na borda, http so no loopback.
+        allowed_origins=[
+            *(f"https://{h}" for h in publicos),
+            *(f"https://{h}:*" for h in publicos),
+            *(f"http://{h}:*" for h in _HOSTS_LOCAIS),
+        ],
+    )
+
+
 mcp = FastMCP(
     "elephant-memory",
+    transport_security=transport_security(),
     instructions=(
         "Memoria de longo prazo em grafo temporal, isolada por projeto. O projeto "
         "atual vem da conexao — voce NAO precisa e NAO deve informa-lo, exceto "
