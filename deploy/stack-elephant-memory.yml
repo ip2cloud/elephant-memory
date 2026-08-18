@@ -26,9 +26,13 @@
 #
 # ── Recursos externos (criar 1x) ─────────────────────────────────────────────
 #   Redes:   network_swarm_public (ja existe), network_swarm_databases (ja existe)
-#   Secrets: elephant_openai_key, elephant_falkordb_password
-#     docker secret create elephant_openai_key -
+#   Secrets: elephant_openai_key_v3, elephant_falkordb_password
+#     docker secret create elephant_openai_key_v3 -
 #     docker secret create elephant_falkordb_password -
+#   Secret do Swarm e IMUTAVEL: trocar o valor exige criar um nome NOVO e
+#   apontar `name:` abaixo para ele. Dai o sufixo `_v3` — o bloco `secrets:`
+#   mapeia esse nome externo para /run/secrets/elephant_openai_key, entao o
+#   caminho que o app le nunca muda.
 #   Registry: credenciais do GHCR no Portainer + --with-registry-auth
 #
 # ── Cloudflare Tunnel: 1 Public Hostname ─────────────────────────────────────
@@ -50,7 +54,7 @@ networks:
 secrets:
   elephant_openai_key:
     external: true
-    name: elephant_openai_key_v2
+    name: elephant_openai_key_v3
   elephant_falkordb_password:
     external: true
 
