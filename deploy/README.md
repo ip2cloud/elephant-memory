@@ -61,11 +61,20 @@ errada sem nenhuma mensagem que explique.
 | `alfredo-pessoal` | `read:` + `write:scout-manager` | Cowork, shell |
 | `publicador-scout` | `read:` + `ingest:scout-manager` | ambiente do publisher |
 
-O nome do service token vira o claim `common_name` do JWT — é a chave do
-`CF_ACCESS_GRANTS`. Nome do token e chave do mapa **têm que bater**.
+A chave do `CF_ACCESS_GRANTS` é o **Client ID** do service token — a string
+`<32 hex>.access`, não o apelido que você deu a ele. É isso que o Cloudflare põe
+no claim `common_name`, e é o que `app/auth.py` procura no mapa. O apelido serve
+só para você achar o token na tela do Zero Trust.
+
+Errar aqui **não quebra o boot**: `assert_grants_within_registry` valida os
+projetos, não as identidades. Uma chave com apelido em vez de Client ID casa com
+ninguém, `grants` fica vazio, e o sintoma é "esta credencial não tem
+`write:projeto`" numa credencial que autentica perfeitamente.
 
 Service tokens expiram (padrão até 1 ano). Quando vencerem, tudo para junto —
-vale lembrete no calendário.
+vale lembrete no calendário. Se criar vários de uma vez, escalone as datas de
+propósito: com todos vencendo no mesmo dia, o sintoma é `403` do Cloudflare em
+tudo simultaneamente, o que não se parece com "token venceu".
 
 ## 4. Variáveis no Portainer
 
@@ -76,8 +85,12 @@ MCP_ALLOWED_HOSTS      memoria.SEU.DOMINIO
 CF_ACCESS_TEAM_DOMAIN  seutime.cloudflareaccess.com
 ELEPHANT_CF_AUD        <AUD da Access App>
 PROJECTS               ["scout-manager"]
-CF_ACCESS_GRANTS       {"repo-scout":["read:scout-manager"],"alfredo-pessoal":["read:scout-manager","write:scout-manager"],"publicador-scout":["read:scout-manager","ingest:scout-manager"]}
+CF_ACCESS_GRANTS       {"<clientid-repo>.access":["read:scout-manager"],"<clientid-pessoal>.access":["read:scout-manager","write:scout-manager"],"<clientid-publicador>.access":["read:scout-manager","ingest:scout-manager"]}
 ```
+
+Cada `<clientid-*>` é o **Client ID** do service token correspondente
+(`<32 hex>.access`), copiado de Zero Trust → Access → Service Auth. Ver a nota
+no passo 3 sobre por que o apelido do token não funciona aqui.
 
 O boot **recusa subir** se algum grant apontar para projeto fora de `PROJECTS`.
 É proposital: typo em permissão vira erro de inicialização, não descoberta
