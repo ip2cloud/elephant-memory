@@ -41,7 +41,7 @@ As redes já existem (`network_swarm_public`, `network_swarm_databases`). Faltam
 os secrets:
 
 ```bash
-printf '%s' 'sk-...'            | docker secret create elephant_openai_key -
+printf '%s' 'sk-...'            | docker secret create elephant_openai_key_v3 -
 openssl rand -base64 24 | tr -d '\n' | docker secret create elephant_falkordb_password -
 ```
 
