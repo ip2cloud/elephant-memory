@@ -150,6 +150,64 @@ ou diferente do hostname do Tunnel — não é problema de credencial nem de
 projeto. O request nem chegou no nosso código. A partir da 0.1.1 o serviço nem
 sobe sem a variável, então `421` aqui quer dizer valor **errado**, não faltando.
 
+## 7. FalkorDB Browser (opcional)
+
+O serviço `elephant-browser` serve a UI de inspeção do grafo. É **opcional**: o
+`redis-cli` dentro do container do FalkorDB resolve consulta pontual sem abrir
+superfície nenhuma.
+
+```bash
+CID=$(docker ps -qf name=elephant-memory_falkordb)
+Q() { docker exec -i $CID sh -c "redis-cli -a \"\$(cat /run/secrets/elephant_falkordb_password)\" --no-auth-warning $*"; }
+
+Q GRAPH.LIST                                     # um grafo por projeto
+Q 'GRAPH.QUERY jarvis "MATCH (n) RETURN labels(n), count(*)"'
+```
+
+Lembre que **existe um grafo do FalkorDB por projeto**, e que o grafo nomeado em
+`FALKORDB_DATABASE` fica vazio — olhar só ele leva à conclusão errada de que não
+há nada gravado.
+
+### Por que ele é admin, não ferramenta de agente
+
+O browser autentica no banco pela **senha do FalkorDB**, não por service token.
+Consequência: enxerga e **escreve** em todos os projetos. O modelo
+`read:`/`write:`/`ingest:` por projeto não se aplica a ele — Cypher aceita
+`DELETE`, e `GRAPH.DELETE` derruba um projeto inteiro.
+
+Por isso a Access Application dele é **separada**, com policy de **login humano**
+(email + MFA). Nunca Service Auth, e os service tokens do MCP não devem constar
+nessa policy. E note a assimetria com o `elephant-mcp`: aquele valida o JWT por
+conta própria, então o Access é defesa em profundidade; aqui o Access é a
+**única** barreira.
+
+### Ligar
+
+1. Variáveis no Portainer: `BROWSER_HOST` (hostname público, sem esquema) e
+   `BROWSER_TAG` (ex: `v2.4.0` — não use `latest`)
+2. Tunnel → Public Hostname: `${BROWSER_HOST}` → `http://elephant-browser:3000`
+3. Access → Application nova nesse hostname, policy de login humano
+4. Update the stack
+
+Teste antes de expor, direto no manager:
+
+```bash
+docker run --rm -e FALKORDB_URL=redis://elephant-falkordb:6379 \
+  -e FALKORDB_PASSWORD="$(docker exec $(docker ps -qf name=elephant-memory_falkordb) \
+     cat /run/secrets/elephant_falkordb_password)" \
+  --network network_swarm_databases -p 127.0.0.1:3000:3000 \
+  falkordb/falkordb-browser:v2.4.0
+```
+
+Se ele reclamar de `NEXTAUTH_SECRET` no boot, crie um secret e injete pelo mesmo
+entrypoint que já lê a senha — a imagem não conhece a convenção `_FILE`.
+
+### Não ligue `BROWSER=1` no serviço `falkordb`
+
+Aquele container está só em `network_swarm_databases`. Colocá-lo na rede pública
+para expor a UI aproximaria o **banco** do túnel. No desenho atual só o browser
+cruza as duas redes — mesma forma do `elephant-mcp`.
+
 ## Decisões deste stack
 
 **FalkorDB dedicado, não o `neo4j` vizinho.** Aquele é Community Edition —
