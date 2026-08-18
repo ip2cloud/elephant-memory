@@ -20,9 +20,15 @@
 #   CF_ACCESS_TEAM_DOMAIN   seutime.cloudflareaccess.com
 #   ELEPHANT_CF_AUD     Application Audience da Access App desta memoria
 #   PROJECTS                registro de projetos, JSON. Ex: ["scout-manager"]
-#   CF_ACCESS_GRANTS        identidade -> grants. Ex:
-#     {"publicador-scout":["read:scout-manager","ingest:scout-manager"],
-#      "alfredo-pessoal":["read:scout-manager","write:scout-manager"]}
+#   CF_ACCESS_GRANTS        identidade -> grants, chaveado pelo CLIENT ID do
+#                           service token (`<32hex>.access`), que e o que o
+#                           Cloudflare poe no claim `common_name` — NAO o
+#                           apelido do token. Ex:
+#     {"3c5aeeea....access":["read:scout-manager","ingest:scout-manager"],
+#      "89f0fd46....access":["read:scout-manager","write:scout-manager"]}
+#   BROWSER_HOST            hostname publico do FalkorDB Browser
+#                           (ex: elephant-browser.SEU.DOMINIO). Sem esquema.
+#   BROWSER_TAG             tag do falkordb/falkordb-browser (ex: v2.4.0)
 #
 # ── Recursos externos (criar 1x) ─────────────────────────────────────────────
 #   Redes:   network_swarm_public (ja existe), network_swarm_databases (ja existe)
@@ -35,11 +41,21 @@
 #   caminho que o app le nunca muda.
 #   Registry: credenciais do GHCR no Portainer + --with-registry-auth
 #
-# ── Cloudflare Tunnel: 1 Public Hostname ─────────────────────────────────────
+# ── Cloudflare Tunnel: 2 Public Hostnames ────────────────────────────────────
 #   memoria.SEU.DOMINIO -> http://elephant-mcp:8080
 #   Access Application com policy **Service Auth** e service tokens.
 #   Sem Access na frente, o servidor ainda recusa: ele valida o JWT por conta
 #   propria (AUTH_MODE=cloudflare). Defesa em profundidade, nao redundancia.
+#
+#   ${BROWSER_HOST} -> http://elephant-browser:3000
+#   Access Application SEPARADA, com policy de **login humano** (email + MFA).
+#   NUNCA Service Auth aqui, e os service tokens do MCP nao devem constar nessa
+#   policy: o browser entra no banco pela SENHA do FalkorDB, entao enxerga e
+#   ESCREVE em todos os projetos. O modelo read:/write:/ingest: por projeto nao
+#   se aplica a ele — Cypher aceita DELETE e GRAPH.DELETE derruba um projeto
+#   inteiro. Isto e ferramenta de administracao, nao de agente.
+#   Ao contrario do elephant-mcp, o browser NAO valida o JWT por conta propria:
+#   aqui o Access e a unica barreira, nao defesa em profundidade.
 
 version: "3.8"
 
@@ -260,3 +276,76 @@ services:
         parallelism: 1
         delay: 0s
         failure_action: pause
+
+  # ---------------------------------------------------------------------------
+  # elephant-browser — UI de inspecao do grafo. ADMIN, nao ferramenta de agente.
+  #
+  # Existe porque `GRAPH.LIST` + `GRAPH.QUERY` no redis-cli resolvem a consulta
+  # pontual, mas nao a leitura da topologia. O custo dessa conveniencia esta no
+  # cabecalho: ele autentica no banco pela SENHA, nao por token, entao ve e
+  # escreve em TODOS os projetos. Toda a contencao dele vive na policy do Access.
+  #
+  # Nao ligar `BROWSER=1` no servico falkordb em vez disto: aquele container so
+  # esta em network_swarm_databases, e coloca-lo na rede publica para expor a UI
+  # aproximaria o BANCO do tunel. Aqui so o browser cruza as duas redes — mesma
+  # forma do elephant-mcp.
+  # ---------------------------------------------------------------------------
+  elephant-browser:
+    image: falkordb/falkordb-browser:${BROWSER_TAG}
+    secrets:
+      - elephant_falkordb_password
+    # A imagem le FALKORDB_PASSWORD do AMBIENTE e nao conhece a convencao
+    # `_FILE` do resto deste stack. Passar a senha em `environment:` a exporia
+    # em `docker inspect`, em log de crash e na UI do Portainer — exatamente o
+    # que app/config.py existe para evitar. O entrypoint le do secret e exporta
+    # so dentro do processo.
+    #
+    # `exec docker-entrypoint.sh node server.js` reproduz o ENTRYPOINT + CMD da
+    # imagem (["docker-entrypoint.sh"] + ["node","server.js"]). Sobrescrever o
+    # entrypoint DESCARTA o CMD, entao ele precisa ser repetido aqui: sem o
+    # `node server.js` o container sobe e sai sem servir nada.
+    #
+    # `$$` vira `$` dentro do container — sem isso o Swarm tentaria interpolar.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        export FALKORDB_PASSWORD="$$(cat /run/secrets/elephant_falkordb_password)";
+        exec docker-entrypoint.sh node server.js
+    environment:
+      FALKORDB_URL: redis://elephant-falkordb:6379
+      # Atras do tunel o NextAuth precisa saber a URL publica, senao monta
+      # callbacks para o hostname interno e o login entra em loop.
+      NEXTAUTH_URL: https://${BROWSER_HOST}
+      TRUST_PROXY_HEADERS: "true"
+    networks:
+      network_swarm_public:
+        aliases:
+          - elephant-browser
+      # Alcanca o banco pela rede interna. O falkordb continua FORA da publica.
+      network_swarm_databases: {}
+    deploy:
+      mode: replicated
+      # Sessao do NextAuth fica em memoria do processo; com 2 replicas o login
+      # cai a cada request que bate na outra.
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.05"
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        # Sem volume nem estado em disco: start-first e seguro aqui.
+        order: start-first
